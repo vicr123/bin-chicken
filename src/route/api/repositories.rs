@@ -1,26 +1,37 @@
 use crate::configuration::RepositoryConfiguration;
+use crate::database;
 use crate::database::{create_version, ensure_up_to_date};
+use crate::route::api::Pagination;
 use crate::route::RouterState;
-use axum::body::{Body, Bytes, HttpBody};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::body::Body;
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Error, Json, Router};
+use axum::{Json, Router};
+use axum_extra::headers::Range;
+use axum_extra::TypedHeader;
+use axum_range::{KnownSize, Ranged};
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
 use tokio_rusqlite::Connection;
+use tokio_util::io::ReaderStream;
 use tracing::error;
 
 pub fn routes() -> Router<RouterState> {
-    Router::new().route("/{repository}", get(get_repository).put(put_repository))
+    Router::new()
+        .route("/{repository}", get(get_artifact_list).put(put_repository))
+        .route("/{repository}/artifacts/{artifact}", get(get_artifact))
+}
+
+#[derive(Deserialize)]
+struct RepositoryContextParams {
+    repository: String,
 }
 
 struct RepositoryContext {
@@ -37,7 +48,9 @@ impl FromRequestParts<RouterState> for RepositoryContext {
         parts: &mut Parts,
         state: &RouterState,
     ) -> Result<Self, Self::Rejection> {
-        let Ok(Path(repository)) = Path::<String>::from_request_parts(parts, state).await else {
+        let Ok(Path(RepositoryContextParams { repository })) =
+            Path::<RepositoryContextParams>::from_request_parts(parts, state).await
+        else {
             return Err(StatusCode::NOT_FOUND);
         };
 
@@ -99,6 +112,7 @@ struct PutRepositoryErrorResponse {
 enum PutRepositoryErrorResponseType {
     MissingChannelHeader,
     MissingTargetHeader,
+    MissingUuidHeader,
 }
 
 async fn put_repository(
@@ -107,25 +121,65 @@ async fn put_repository(
     request: Request<Body>,
 ) -> Response<Body> {
     // TODO: Check auth
-    
-    let Some(channel) = request.headers().get("x-bin-chicken-channel").and_then(|channel| channel.to_str().ok())  else {
-        return (StatusCode::BAD_REQUEST, Json(PutRepositoryErrorResponse { error: PutRepositoryErrorResponseType::MissingChannelHeader })).into_response();
+
+    let Some(uuid) = request
+        .headers()
+        .get("x-bin-chicken-uuid")
+        .and_then(|uuid| uuid.to_str().ok())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::MissingUuidHeader,
+            }),
+        )
+            .into_response();
     };
-    
-    let Some(target) = request.headers().get("x-bin-chicken-target").and_then(|target| target.to_str().ok()) else {
-        return (StatusCode::BAD_REQUEST, Json(PutRepositoryErrorResponse { error: PutRepositoryErrorResponseType::MissingTargetHeader })).into_response();   
+
+    let Some(channel) = request
+        .headers()
+        .get("x-bin-chicken-channel")
+        .and_then(|channel| channel.to_str().ok())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::MissingChannelHeader,
+            }),
+        )
+            .into_response();
+    };
+
+    let Some(target) = request
+        .headers()
+        .get("x-bin-chicken-target")
+        .and_then(|target| target.to_str().ok())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::MissingTargetHeader,
+            }),
+        )
+            .into_response();
     };
 
     let repository_id = repository_context.repository_id;
     let database_connection = repository_context.database_connection;
-    let version_handle =
-        match create_version(&database_connection, target.to_string(), channel.to_string()).await {
-            Ok(version) => version,
-            Err(e) => {
-                error!("Failed to create new version for repository {repository_id}: {e}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let version_handle = match create_version(
+        &database_connection,
+        uuid.to_string(),
+        target.to_string(),
+        channel.to_string(),
+    )
+    .await
+    {
+        Ok(version) => version,
+        Err(e) => {
+            error!("Failed to create new version for repository {repository_id}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let version = version_handle.version().to_string();
 
@@ -164,8 +218,6 @@ async fn put_repository(
         }
     }
 
-    // TODO: Sign the artifact
-
     if let Err(e) = version_handle.mark_complete().await {
         error!("Failed to mark version {version} in repository {repository_id} as complete: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -178,4 +230,85 @@ async fn put_repository(
         }),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ArtifactSearch {
+    target: Option<String>,
+    channel: Option<String>,
+}
+
+async fn get_artifact_list(
+    repository_context: RepositoryContext,
+    search: Query<ArtifactSearch>,
+    pagination: Query<Pagination>,
+    state: State<RouterState>,
+) -> Response<Body> {
+    let Ok(artifact_list) = database::get_artifact_list(
+        &repository_context.database_connection,
+        search.target.clone(),
+        search.channel.clone(),
+        (*pagination).clone(),
+    )
+    .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    (StatusCode::OK, Json(artifact_list)).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ArtifactDownload {
+    artifact: u64,
+}
+
+async fn get_artifact(
+    repository_context: RepositoryContext,
+    Path(ArtifactDownload { artifact }): Path<ArtifactDownload>,
+    range: Option<TypedHeader<Range>>,
+) -> Response<Body> {
+    let artifact =
+        match database::get_artifact(&repository_context.database_connection, artifact).await {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => {
+                error!(
+                    "Failed to query for version {artifact} in repository {}: {e}",
+                    repository_context.repository_id
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+    let version = artifact.number.to_string();
+    let version_path = repository_context.repository_root.join(&version);
+
+    let artifact_file = version_path.join("artifact.bin");
+
+    let file = match File::open(&artifact_file).await {
+        Ok(file) => file,
+        Err(e) => {
+            error!(
+                "Failed to open artifact file {artifact_file:?} for version {version} in repository {}: {e}",
+                repository_context.repository_id
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    respond_with_file(file, range).await
+}
+
+async fn respond_with_file(file: File, range: Option<TypedHeader<Range>>) -> Response<Body> {
+    let body = match KnownSize::file(file).await {
+        Ok(body) => body,
+        Err(e) => {
+            error!("Failed to get file metadata: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let range = range.map(|TypedHeader(range)| range);
+    Ranged::new(range, body).into_response()
 }

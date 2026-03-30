@@ -1,4 +1,4 @@
-mod api;
+pub mod api;
 
 use crate::configuration::Configuration;
 use axum::routing::get;

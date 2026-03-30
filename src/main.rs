@@ -4,18 +4,13 @@ mod route;
 
 use crate::configuration::Configuration;
 use crate::route::{setup_routes, RouterState};
-use axum::routing::get;
-use axum::Router;
 use clap::Parser;
 use clap_verbosity_flag::InfoLevel;
 use std::fs::read_to_string;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UnixListener};
 use tracing::{error, info};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]

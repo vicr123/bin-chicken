@@ -1,5 +1,6 @@
-use tokio::task::spawn_blocking;
-use tokio_rusqlite::{Connection, named_params};
+use crate::route::api::Pagination;
+use serde::Serialize;
+use tokio_rusqlite::{named_params, Connection, OptionalExtension};
 
 pub async fn setup_database(connection: &Connection) -> Result<(), tokio_rusqlite::Error> {
     connection
@@ -40,15 +41,17 @@ pub struct VersionHandle<'connection> {
 
 pub async fn create_version(
     connection: &Connection,
+    uuid: String,
     target: String,
     channel: String,
 ) -> Result<VersionHandle, tokio_rusqlite::Error> {
     connection
         .call(move |connection| {
             connection
-                .prepare("INSERT INTO artifacts(target, channel) VALUES(:target, :channel) RETURNING number;")?
+                .prepare("INSERT INTO artifacts(uuid, target, channel) VALUES(:uuid, :target, :channel) RETURNING number;")?
                 .query_one(
                     named_params! {
+                        ":uuid": uuid,
                         ":target": target,
                         ":channel": channel
                     },
@@ -77,4 +80,78 @@ impl VersionHandle<'_> {
             })
             .await
     }
+}
+
+#[derive(Serialize)]
+pub struct ArtifactVersion {
+    pub number: u64,
+    pub target: String,
+    pub channel: String,
+    pub version: Option<String>,
+}
+
+pub async fn get_artifact_list(
+    connection: &Connection,
+    target: Option<String>,
+    channel: Option<String>,
+    pagination: Pagination,
+) -> Result<Vec<ArtifactVersion>, tokio_rusqlite::Error> {
+    connection
+        .call(move |connection| {
+            connection
+                .prepare(
+                    "SELECT number, target, channel, version
+                                  FROM artifacts
+                                  WHERE complete = 1
+                                    AND (target = :target OR :target IS NULL)
+                                    AND (channel = :channel OR :channel IS NULL)
+                                  ORDER BY number DESC
+                                  LIMIT :limit
+                                  OFFSET :offset;",
+                )?
+                .query_map(
+                    named_params! {
+                        ":target": target,
+                        ":channel": channel,
+                        ":limit": pagination.limit(),
+                        ":offset": pagination.offset()
+                    },
+                    |row| {
+                        Ok(ArtifactVersion {
+                            number: row.get(0)?,
+                            target: row.get(1)?,
+                            channel: row.get(2)?,
+                            version: row.get(3)?,
+                        })
+                    },
+                )
+                .map(|result| result.map(|result| result.unwrap()).collect())
+        })
+        .await
+}
+
+pub async fn get_artifact(connection: &Connection, number: u64) -> Result<Option<ArtifactVersion>, tokio_rusqlite::Error> {
+    connection
+        .call(move |connection| {
+            connection
+                .prepare(
+                    "SELECT number, target, channel, version
+                                  FROM artifacts
+                                  WHERE number = :number;",
+                )?
+                .query_one(
+                    named_params! {
+                        ":number": number,
+                    },
+                    |row| {
+                        Ok(ArtifactVersion {
+                            number: row.get(0)?,
+                            target: row.get(1)?,
+                            channel: row.get(2)?,
+                            version: row.get(3)?,
+                        })
+                    },
+                ).optional()
+        })
+        .await
 }
