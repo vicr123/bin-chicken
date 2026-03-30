@@ -12,4 +12,5 @@ pub struct Configuration {
 #[derive(Deserialize, Clone)]
 pub struct RepositoryConfiguration {
     pub name: String,
+    pub minisign_key: String,
 }

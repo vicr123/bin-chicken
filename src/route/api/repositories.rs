@@ -13,9 +13,12 @@ use axum::{Json, Router};
 use axum_extra::headers::Range;
 use axum_extra::TypedHeader;
 use axum_range::{KnownSize, Ranged};
+use base64::prelude::BASE64_STANDARD;
 use futures_util::StreamExt;
+use minisign_verify::{Error, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use base64::Engine;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -113,6 +116,8 @@ enum PutRepositoryErrorResponseType {
     MissingChannelHeader,
     MissingTargetHeader,
     MissingUuidHeader,
+    MissingSignatureHeader,
+    InvalidSignature,
 }
 
 async fn put_repository(
@@ -164,7 +169,53 @@ async fn put_repository(
             .into_response();
     };
 
+    let Some(signature_text) = request
+        .headers()
+        .get("x-bin-chicken-signature")
+        .and_then(|sig| sig.to_str().ok())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::MissingSignatureHeader,
+            }),
+        )
+            .into_response();
+    };
+    let Ok(Ok(signature_text)) = BASE64_STANDARD.decode(signature_text.as_bytes()).map(|bytes| String::from_utf8(bytes)) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::InvalidSignature,
+            }),
+        )
+            .into_response();
+    };
+
+    let Ok(signature) = Signature::decode(&signature_text) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PutRepositoryErrorResponse {
+                error: PutRepositoryErrorResponseType::InvalidSignature,
+            }),
+        )
+            .into_response();
+    };
+
     let repository_id = repository_context.repository_id;
+
+    let Ok(public_key) =
+        PublicKey::from_base64(&repository_context.repository_configuration.minisign_key)
+    else {
+        error!("Failed to parse public key for repository {repository_id}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let Ok(mut verifier) = public_key.verify_stream(&signature) else {
+        error!("Failed to verify signature for repository {repository_id}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
     let database_connection = repository_context.database_connection;
     let version_handle = match create_version(
         &database_connection,
@@ -204,6 +255,7 @@ async fn put_repository(
     while let Some(frame) = body_stream.next().await {
         match frame {
             Ok(frame) => {
+                verifier.update(&frame);
                 if let Err(e) = artifact_file.write_all(&frame).await {
                     error!(
                         "Failed to write to artifact file in version {version} in repository {repository_id}: {e}"
@@ -216,6 +268,29 @@ async fn put_repository(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
+    }
+
+    if let Err(e) = verifier.finalize() {
+        return match e {
+            Error::InvalidSignature => (
+                StatusCode::BAD_REQUEST,
+                Json(PutRepositoryErrorResponse {
+                    error: PutRepositoryErrorResponseType::InvalidSignature,
+                }),
+            )
+                .into_response(),
+            _ => {
+                error!("Failed to verify signature for repository {repository_id}: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
+
+    if let Err(e) = fs::write(version_path.join("artifact.sig"), signature_text.as_bytes()).await {
+        error!(
+            "Failed to create signature file in version {version} in repository {repository_id}: {e}"
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     if let Err(e) = version_handle.mark_complete().await {

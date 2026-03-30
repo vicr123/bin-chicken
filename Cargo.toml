@@ -17,3 +17,5 @@ futures-util = "0.3"
 tokio-rusqlite = "0.7"
 axum-range = "1"
 axum-extra = { version = "0.12", features = ["typed-header"] }
+minisign-verify = "0.2"
+base64 = "0.22"
