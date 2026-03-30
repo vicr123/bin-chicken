@@ -1,30 +1,34 @@
-use crate::configuration::RepositoryConfiguration;
+use crate::configuration::{RepositoryAuthenticator, RepositoryConfiguration};
 use crate::database;
 use crate::database::{create_version, ensure_up_to_date};
-use crate::route::api::Pagination;
 use crate::route::RouterState;
+use crate::route::api::Pagination;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use axum_extra::headers::Range;
 use axum_extra::TypedHeader;
+use axum_extra::headers::authorization::Bearer;
+use axum_extra::headers::{Authorization, Range};
 use axum_range::{KnownSize, Ranged};
+use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use futures_util::StreamExt;
 use minisign_verify::{Error, PublicKey, Signature};
+use octocrab::Octocrab;
+use octocrab::models::InstallationRepositories;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use base64::Engine;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_rusqlite::Connection;
 use tokio_util::io::ReaderStream;
-use tracing::error;
+use tracing::{error, warn};
 
 pub fn routes() -> Router<RouterState> {
     Router::new()
@@ -37,11 +41,11 @@ struct RepositoryContextParams {
     repository: String,
 }
 
-struct RepositoryContext {
-    repository_id: String,
-    repository_configuration: RepositoryConfiguration,
-    repository_root: PathBuf,
-    database_connection: Connection,
+pub struct RepositoryContext {
+    pub repository_id: String,
+    pub repository_configuration: RepositoryConfiguration,
+    pub repository_root: PathBuf,
+    pub database_connection: Connection,
 }
 
 impl FromRequestParts<RouterState> for RepositoryContext {
@@ -121,11 +125,14 @@ enum PutRepositoryErrorResponseType {
 }
 
 async fn put_repository(
+    authorization: Option<TypedHeader<Authorization<Bearer>>>,
     repository_context: RepositoryContext,
     state: State<RouterState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    // TODO: Check auth
+    if let Err(e) = put_repository_auth(authorization, &repository_context).await {
+        return e.into_response();
+    }
 
     let Some(uuid) = request
         .headers()
@@ -182,7 +189,10 @@ async fn put_repository(
         )
             .into_response();
     };
-    let Ok(Ok(signature_text)) = BASE64_STANDARD.decode(signature_text.as_bytes()).map(|bytes| String::from_utf8(bytes)) else {
+    let Ok(Ok(signature_text)) = BASE64_STANDARD
+        .decode(signature_text.as_bytes())
+        .map(|bytes| String::from_utf8(bytes))
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(PutRepositoryErrorResponse {
@@ -305,6 +315,60 @@ async fn put_repository(
         }),
     )
         .into_response()
+}
+
+async fn put_repository_auth(
+    authorization: Option<TypedHeader<Authorization<Bearer>>>,
+    repository_context: &RepositoryContext,
+) -> Result<(), StatusCode> {
+    let Some(authorization) = authorization else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    for authenticator in &repository_context.repository_configuration.authenticators {
+        match authenticator {
+            RepositoryAuthenticator::GithubAuthTokenRepository { repository } => {
+                // Interpret the auth token as a GH auth token
+                let crab = match Octocrab::builder()
+                    .user_access_token(authorization.token())
+                    .build()
+                {
+                    Ok(crab) => crab,
+                    Err(_) => continue,
+                };
+                let available_repositories: Result<InstallationRepositories, _> =
+                    crab.get("/installation/repositories", None::<&()>).await;
+
+                let available_repositories = match available_repositories {
+                    Ok(available_repositories) => available_repositories,
+                    Err(e) => {
+                        continue
+                    }
+                };
+
+                for github_repository in available_repositories.repositories {
+                    if github_repository
+                        .full_name
+                        .is_some_and(|github_repository| &github_repository == repository)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            RepositoryAuthenticator::OpenForWriteAccess { this_is_dangerous } => {
+                if this_is_dangerous == "i understand" {
+                    return Ok(());
+                } else {
+                    warn!(
+                        "OpenForWriteAccess requires explicit confirmation, configure \
+                        this_is_dangerous: \"i understand\" to allow open write access"
+                    )
+                }
+            }
+        }
+    }
+
+    Err(StatusCode::FORBIDDEN)
 }
 
 #[derive(Deserialize)]
