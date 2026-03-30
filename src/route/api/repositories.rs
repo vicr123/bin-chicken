@@ -1,33 +1,31 @@
 use crate::configuration::{RepositoryAuthenticator, RepositoryConfiguration};
 use crate::database;
 use crate::database::{create_version, ensure_up_to_date};
-use crate::route::RouterState;
 use crate::route::api::Pagination;
+use crate::route::RouterState;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{Request, StatusCode, header};
-use axum::middleware::{from_fn, from_fn_with_state};
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use axum_extra::TypedHeader;
 use axum_extra::headers::authorization::Bearer;
-use axum_extra::headers::{Authorization, Range};
+use axum_extra::headers::{Authorization, HeaderValue, Range};
+use axum_extra::{headers, TypedHeader};
 use axum_range::{KnownSize, Ranged};
-use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use futures_util::StreamExt;
 use minisign_verify::{Error, PublicKey, Signature};
-use octocrab::Octocrab;
 use octocrab::models::InstallationRepositories;
+use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_rusqlite::Connection;
-use tokio_util::io::ReaderStream;
 use tracing::{error, warn};
 
 pub fn routes() -> Router<RouterState> {
@@ -341,9 +339,7 @@ async fn put_repository_auth(
 
                 let available_repositories = match available_repositories {
                     Ok(available_repositories) => available_repositories,
-                    Err(e) => {
-                        continue
-                    }
+                    Err(e) => continue,
                 };
 
                 for github_repository in available_repositories.repositories {
@@ -423,6 +419,12 @@ async fn get_artifact(
     let version = artifact.number.to_string();
     let version_path = repository_context.repository_root.join(&version);
 
+    let signature_file = version_path.join("artifact.sig");
+    let signature = fs::read(&signature_file)
+        .await
+        .ok()
+        .map(|s| BASE64_STANDARD.encode(s));
+
     let artifact_file = version_path.join("artifact.bin");
 
     let file = match File::open(&artifact_file).await {
@@ -436,10 +438,14 @@ async fn get_artifact(
         }
     };
 
-    respond_with_file(file, range).await
+    respond_with_file(file, signature, range).await
 }
 
-async fn respond_with_file(file: File, range: Option<TypedHeader<Range>>) -> Response<Body> {
+async fn respond_with_file(
+    file: File,
+    signature: Option<String>,
+    range: Option<TypedHeader<Range>>,
+) -> Response<Body> {
     let body = match KnownSize::file(file).await {
         Ok(body) => body,
         Err(e) => {
@@ -449,5 +455,14 @@ async fn respond_with_file(file: File, range: Option<TypedHeader<Range>>) -> Res
     };
 
     let range = range.map(|TypedHeader(range)| range);
-    Ranged::new(range, body).into_response()
+    let mut response = Ranged::new(range, body).into_response();
+    if let Some(signature) = signature
+        && let Ok(signature_value) = HeaderValue::from_str(&signature)
+    {
+        response
+            .headers_mut()
+            .insert("X-Bin-Chicken-Signature", signature_value);
+    };
+
+    response
 }
