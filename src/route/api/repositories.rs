@@ -183,6 +183,12 @@ async fn put_repository(
             .into_response();
     };
 
+    let original_filename = request
+        .headers()
+        .get("x-bin-chicken-original-filename")
+        .and_then(|target| target.to_str().ok())
+        .map(|str| str.to_string());
+
     let Some(signature_text) = request
         .headers()
         .get("x-bin-chicken-signature")
@@ -239,6 +245,7 @@ async fn put_repository(
         uuid.to_string(),
         target.to_string(),
         channel.to_string(),
+        original_filename,
     )
     .await
     {
@@ -447,13 +454,14 @@ async fn get_artifact(
         }
     };
 
-    respond_with_file(file, signature, range).await
+    respond_with_file(file, signature, range, artifact.original_filename).await
 }
 
 async fn respond_with_file(
     file: File,
     signature: Option<String>,
     range: Option<TypedHeader<Range>>,
+    original_filename: Option<String>,
 ) -> Response<Body> {
     let body = match KnownSize::file(file).await {
         Ok(body) => body,
@@ -472,6 +480,15 @@ async fn respond_with_file(
             .headers_mut()
             .insert("X-Bin-Chicken-Signature", signature_value);
     };
+
+    if let Some(original_filename) = original_filename
+        && let Ok(original_filename_value) =
+            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", original_filename))
+    {
+        response
+            .headers_mut()
+            .insert("Content-Disposition", original_filename_value);
+    }
 
     response
 }

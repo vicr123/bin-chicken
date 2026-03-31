@@ -30,6 +30,11 @@ pub async fn ensure_up_to_date(connection: &Connection) -> Result<(), tokio_rusq
                 version += 1;
             }
 
+            if version < 2 {
+                connection.execute_batch(include_str!("database/version-2.sql"))?;
+                version += 1;
+            }
+
             Ok(())
         })
         .await
@@ -45,16 +50,18 @@ pub async fn create_version(
     uuid: String,
     target: String,
     channel: String,
+    original_filename: Option<String>,
 ) -> Result<VersionHandle, tokio_rusqlite::Error> {
     connection
         .call(move |connection| {
             connection
-                .prepare("INSERT INTO artifacts(uuid, target, channel) VALUES(:uuid, :target, :channel) RETURNING number;")?
+                .prepare("INSERT INTO artifacts(uuid, target, channel, original_filename) VALUES(:uuid, :target, :channel, :original_filename) RETURNING number;")?
                 .query_one(
                     named_params! {
                         ":uuid": uuid,
                         ":target": target,
-                        ":channel": channel
+                        ":channel": channel,
+                        ":original_filename": original_filename
                     },
                     |row| row.get(0),
                 )
@@ -89,6 +96,7 @@ pub struct ArtifactVersion {
     pub target: String,
     pub channel: String,
     pub version: Option<String>,
+    pub original_filename: Option<String>,
 }
 
 pub async fn get_artifact_list(
@@ -101,7 +109,7 @@ pub async fn get_artifact_list(
         .call(move |connection| {
             connection
                 .prepare(
-                    "SELECT number, target, channel, version
+                    "SELECT number, target, channel, version, original_filename
                                   FROM artifacts
                                   WHERE complete = 1
                                     AND (target = :target OR :target IS NULL)
@@ -123,6 +131,7 @@ pub async fn get_artifact_list(
                             target: row.get(1)?,
                             channel: row.get(2)?,
                             version: row.get(3)?,
+                            original_filename: row.get(4)?,
                         })
                     },
                 )
@@ -139,7 +148,7 @@ pub async fn get_artifact(
         .call(move |connection| {
             connection
                 .prepare(
-                    "SELECT number, target, channel, version
+                    "SELECT number, target, channel, version, original_filename
                                   FROM artifacts
                                   WHERE number = :number;",
                 )?
@@ -153,6 +162,7 @@ pub async fn get_artifact(
                             target: row.get(1)?,
                             channel: row.get(2)?,
                             version: row.get(3)?,
+                            original_filename: row.get(4)?,
                         })
                     },
                 )
@@ -169,7 +179,7 @@ pub async fn get_latest_artifact_by_uuid(
         .call(move |connection| {
             connection
                 .prepare(
-                    "SELECT * FROM (SELECT a.number, a.target, a.channel, a.version, a.uuid
+                    "SELECT * FROM (SELECT a.number, a.target, a.channel, a.version, a.original_filename, a.uuid
                                   FROM artifacts a, artifacts b
                                   WHERE b.uuid = :uuid
                                       AND a.target = b.target
@@ -188,6 +198,7 @@ pub async fn get_latest_artifact_by_uuid(
                             target: row.get(1)?,
                             channel: row.get(2)?,
                             version: row.get(3)?,
+                            original_filename: row.get(4)?,
                         })
                     },
                 )
