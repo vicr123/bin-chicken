@@ -44,7 +44,7 @@ jobs:
         uses: docker/build-push-action@master
         with:
           context: .
-          file: Parlance/Dockerfile
+          file: Dockerfile
           push: ${{ steps.checkpr.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
