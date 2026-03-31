@@ -1,5 +1,6 @@
 use crate::route::api::Pagination;
 use serde::Serialize;
+use tokio_rusqlite::fallible_iterator::FallibleIterator;
 use tokio_rusqlite::{named_params, Connection, OptionalExtension};
 
 pub async fn setup_database(connection: &Connection) -> Result<(), tokio_rusqlite::Error> {
@@ -130,7 +131,10 @@ pub async fn get_artifact_list(
         .await
 }
 
-pub async fn get_artifact(connection: &Connection, number: u64) -> Result<Option<ArtifactVersion>, tokio_rusqlite::Error> {
+pub async fn get_artifact(
+    connection: &Connection,
+    number: u64,
+) -> Result<Option<ArtifactVersion>, tokio_rusqlite::Error> {
     connection
         .call(move |connection| {
             connection
@@ -151,7 +155,43 @@ pub async fn get_artifact(connection: &Connection, number: u64) -> Result<Option
                             version: row.get(3)?,
                         })
                     },
-                ).optional()
+                )
+                .optional()
+        })
+        .await
+}
+
+pub async fn get_latest_artifact_by_uuid(
+    connection: &Connection,
+    uuid: String,
+) -> Result<Option<ArtifactVersion>, tokio_rusqlite::Error> {
+    connection
+        .call(move |connection| {
+            connection
+                .prepare(
+                    "SELECT * FROM (SELECT a.number, a.target, a.channel, a.version, a.uuid
+                                  FROM artifacts a, artifacts b
+                                  WHERE b.uuid = :uuid
+                                      AND a.target = b.target
+                                      AND a.channel = b.channel
+                                      AND a.complete = 1
+                                  ORDER BY a.number DESC
+                                  LIMIT 1) AS query WHERE query.uuid != :uuid;",
+                )?
+                .query_one(
+                    named_params! {
+                        ":uuid": uuid,
+                    },
+                    |row| {
+                        Ok(ArtifactVersion {
+                            number: row.get(0)?,
+                            target: row.get(1)?,
+                            channel: row.get(2)?,
+                            version: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
         })
         .await
 }

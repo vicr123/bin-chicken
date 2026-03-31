@@ -37,6 +37,10 @@ pub fn routes() -> Router<RouterState> {
                 .layer(DefaultBodyLimit::max(0b1 << 30 /* 1 GiB */)),
         )
         .route("/{repository}/artifacts/{artifact}", get(get_artifact))
+        .route(
+            "/{repository}/latest/by_uuid/{uuid}",
+            get(get_latest_artifact_by_uuid),
+        )
 }
 
 #[derive(Deserialize)]
@@ -470,4 +474,33 @@ async fn respond_with_file(
     };
 
     response
+}
+
+#[derive(Deserialize)]
+pub struct UuidPath {
+    uuid: String,
+}
+
+async fn get_latest_artifact_by_uuid(
+    repository_context: RepositoryContext,
+    Path(UuidPath { uuid }): Path<UuidPath>,
+) -> Response<Body> {
+    let artifact = match database::get_latest_artifact_by_uuid(
+        &repository_context.database_connection,
+        uuid.clone(),
+    )
+    .await
+    {
+        Ok(Some(artifact)) => artifact,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            error!(
+                "Failed to query for UUID {uuid} in repository {}: {e}",
+                repository_context.repository_id
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    Json(artifact).into_response()
 }
