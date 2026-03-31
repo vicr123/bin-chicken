@@ -4,7 +4,7 @@ use crate::database::{create_version, ensure_up_to_date};
 use crate::route::api::Pagination;
 use crate::route::RouterState;
 use axum::body::Body;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -30,7 +30,12 @@ use tracing::{error, warn};
 
 pub fn routes() -> Router<RouterState> {
     Router::new()
-        .route("/{repository}", get(get_artifact_list).put(put_repository))
+        .route(
+            "/{repository}",
+            get(get_artifact_list)
+                .put(put_repository)
+                .layer(DefaultBodyLimit::max(0b1 << 30 /* 1 GiB */)),
+        )
         .route("/{repository}/artifacts/{artifact}", get(get_artifact))
 }
 
