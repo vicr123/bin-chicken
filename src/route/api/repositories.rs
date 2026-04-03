@@ -1,25 +1,25 @@
 use crate::configuration::{RepositoryAuthenticator, RepositoryConfiguration};
 use crate::database;
-use crate::database::{create_version, ensure_up_to_date};
-use crate::route::RouterState;
+use crate::database::{create_version, ensure_up_to_date, ArtifactVersion};
 use crate::route::api::Pagination;
+use crate::route::RouterState;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{Method, Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::{Authorization, HeaderValue, Range};
-use axum_extra::{TypedHeader, headers};
+use axum_extra::{headers, TypedHeader};
 use axum_range::{KnownSize, Ranged};
-use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use futures_util::StreamExt;
 use minisign_verify::{Error, PublicKey, Signature};
-use octocrab::Octocrab;
 use octocrab::models::InstallationRepositories;
+use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
@@ -45,6 +45,10 @@ pub fn routes() -> Router<RouterState> {
         .route(
             "/{repository}/latest/by_uuid/{uuid}",
             get(get_latest_artifact_by_uuid),
+        )
+        .route(
+            "/{repository}/latest/by_target_channel/{target}/{channel}/download",
+            get(get_latest_artifact_by_target_channel_redirect),
         )
         .layer(cors_layer)
 }
@@ -526,4 +530,38 @@ async fn get_latest_artifact_by_uuid(
     };
 
     Json(artifact).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TargetChannelPath {
+    target: String,
+    channel: String,
+}
+
+async fn get_latest_artifact_by_target_channel_redirect(
+    repository_context: RepositoryContext,
+    Path(TargetChannelPath { target, channel }): Path<TargetChannelPath>,
+) -> Response<Body> {
+    let Ok(artifact_list) = database::get_artifact_list(
+        &repository_context.database_connection,
+        Some(target),
+        Some(channel),
+        Pagination {
+            offset: Some(0),
+            limit: Some(1),
+        },
+    )
+    .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    match artifact_list.first() {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(version) => Redirect::temporary(&format!(
+            "/api/repositories/{}/artifacts/{}",
+            repository_context.repository_id, version.number
+        ))
+        .into_response(),
+    }
 }
