@@ -252,6 +252,7 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "yaml_serde",
