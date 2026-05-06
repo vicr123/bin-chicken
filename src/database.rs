@@ -1,6 +1,5 @@
 use crate::route::api::Pagination;
 use serde::Serialize;
-use tokio_rusqlite::fallible_iterator::FallibleIterator;
 use tokio_rusqlite::{named_params, Connection, OptionalExtension};
 
 pub async fn setup_database(connection: &Connection) -> Result<(), tokio_rusqlite::Error> {
@@ -50,17 +49,19 @@ pub async fn create_version(
     uuid: String,
     target: String,
     channel: String,
+    version: Option<String>,
     original_filename: Option<String>,
 ) -> Result<VersionHandle, tokio_rusqlite::Error> {
     connection
         .call(move |connection| {
             connection
-                .prepare("INSERT INTO artifacts(uuid, target, channel, original_filename) VALUES(:uuid, :target, :channel, :original_filename) RETURNING number;")?
+                .prepare("INSERT INTO artifacts(uuid, target, channel, version, original_filename) VALUES(:uuid, :target, :channel, :version, :original_filename) RETURNING number;")?
                 .query_one(
                     named_params! {
                         ":uuid": uuid,
                         ":target": target,
                         ":channel": channel,
+                        ":version": version,
                         ":original_filename": original_filename
                     },
                     |row| row.get(0),

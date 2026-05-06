@@ -1,6 +1,6 @@
 use crate::configuration::{RepositoryAuthenticator, RepositoryConfiguration};
 use crate::database;
-use crate::database::{create_version, ensure_up_to_date, ArtifactVersion};
+use crate::database::{create_version, ensure_up_to_date};
 use crate::route::api::Pagination;
 use crate::route::RouterState;
 use axum::body::Body;
@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::{Authorization, HeaderValue, Range};
-use axum_extra::{headers, TypedHeader};
+use axum_extra::TypedHeader;
 use axum_range::{KnownSize, Ranged};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
@@ -115,13 +115,6 @@ impl FromRequestParts<RouterState> for RepositoryContext {
     }
 }
 
-async fn get_repository(
-    repository_context: RepositoryContext,
-    state: State<RouterState>,
-) -> Response<Body> {
-    "OK".into_response()
-}
-
 #[derive(Serialize)]
 struct PutRepositoryResponse {
     new_version: String,
@@ -144,7 +137,7 @@ enum PutRepositoryErrorResponseType {
 async fn put_repository(
     authorization: Option<TypedHeader<Authorization<Bearer>>>,
     repository_context: RepositoryContext,
-    state: State<RouterState>,
+    _: State<RouterState>,
     request: Request<Body>,
 ) -> Response<Body> {
     if let Err(e) = put_repository_auth(authorization, &repository_context).await {
@@ -192,6 +185,12 @@ async fn put_repository(
         )
             .into_response();
     };
+
+    let version = request
+        .headers()
+        .get("x-bin-chicken-version")
+        .and_then(|version| version.to_str().ok())
+        .map(|version| version.to_string());
 
     let original_filename = request
         .headers()
@@ -255,6 +254,7 @@ async fn put_repository(
         uuid.to_string(),
         target.to_string(),
         channel.to_string(),
+        version,
         original_filename,
     )
     .await
@@ -297,7 +297,7 @@ async fn put_repository(
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
             }
-            Err(e) => {
+            Err(_) => {
                 // ???
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
@@ -365,7 +365,7 @@ async fn put_repository_auth(
 
                 let available_repositories = match available_repositories {
                     Ok(available_repositories) => available_repositories,
-                    Err(e) => continue,
+                    Err(_) => continue,
                 };
 
                 for github_repository in available_repositories.repositories {
@@ -403,7 +403,7 @@ async fn get_artifact_list(
     repository_context: RepositoryContext,
     search: Query<ArtifactSearch>,
     pagination: Query<Pagination>,
-    state: State<RouterState>,
+    _: State<RouterState>,
 ) -> Response<Body> {
     let Ok(artifact_list) = database::get_artifact_list(
         &repository_context.database_connection,
